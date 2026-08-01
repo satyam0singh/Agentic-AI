@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f2027,50:203a43,100:2c5364&height=220&section=header&text=Agentic-AI&fontSize=60&fontColor=ffffff&animation=fadeIn&fontAlignY=35&desc=Notes%20on%20RAG%2C%20Advanced%20RAG%20%26%20MCP&descAlignY=55&descSize=18" width="100%"/>
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0F2027,50:203A43,100:2C5364&height=120&section=header&text=AGENTIC%20AI%20&fontColor=ffffff&animation=fadeIn" />
+</p>
 
 <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=22&pause=1000&color=58A6FF&center=true&vCenter=true&width=650&lines=Personal+knowledge+base+for+Agentic+AI;RAG+%7C+Advanced+RAG+%7C+MCP;Learn.+Document.+Revise.+Repeat." alt="Typing SVG" />
 
@@ -138,12 +140,6 @@ These are primarily **personal learning notes**. Content may evolve as my unders
 ## ⭐ Support
 
 If these notes helped you understand RAG, Advanced RAG, or MCP a little better — consider dropping a ⭐, it genuinely helps.
-
-<div align="center">
-
-[![Star History Chart](https://api.star-history.com/svg?repos=satyam0singh/Agentic-AI&type=Date)](https://star-history.com/#satyam0singh/Agentic-AI&Date)
-
-</div>
 
 ---
 
