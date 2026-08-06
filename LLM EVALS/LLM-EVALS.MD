@@ -20,7 +20,8 @@ This note covers:
 - The three scopes of application evals — **Component, Workflow, and Entire Application**
 - The three **risk categories** every application eval should cover: Quality, Safety, and Operational
 - The full **eval lifecycle**, from defining success criteria to production monitoring
-- The three **evaluation methods** — Programmatic, Human, and LLM-as-a-Judge — and when to use each
+- The three **evaluation methods** — Programmatic, Human, and LLM-as-a-Judge — including judge calibration against human experts, and reference-based vs. reference-free evaluation
+- The critical split between **Offline Evals** (pre-deployment gating) and **Online Evals** (live production monitoring), including production logging architecture and the captured vs. computed metrics distinction
 - Two real production failures that happened because evals were skipped
 - Why "vibe testing" fails, and how LLM evals differ from traditional software testing
 
@@ -59,6 +60,7 @@ By the end of this note, you will be able to:
 - [LLM Application Eval Risk Categories](#llm-application-eval-risk-categories)
 - [LLM Application Eval Workflow](#llm-application-eval-workflow)
 - [LLM Evaluation Methods](#llm-evaluation-methods)
+- [Offline Evals vs. Online Evals](#offline-evals-vs-online-evals)
 - [Case Studies](#case-studies)
 - [Vibe Testing](#vibe-testing)
 - [Software Testing vs. LLM Evals](#software-testing-vs-llm-evals)
@@ -378,6 +380,177 @@ flowchart TD
 | **Human Evaluation** | People / experts | Slow and expensive | Low | High-stakes safety audits, ambiguous creative writing, gold-standard benchmark creation |
 | **Model-Graded (LLM-as-a-Judge)** | Strong LLM | Fast and low cost | High | RAG faithfulness, groundedness, answer relevance, tone, open-ended Q&A |
 
+### LLM-as-a-Judge Deep Dive and Calibration
+
+> 💡 **Tip**: The goal of LLM-as-a-Judge is to replicate human expert evaluation as closely as possible, while cutting evaluation cost by roughly 99% and latency from hours to seconds.
+
+**Practical use case — grading long-form written answers.** Evaluating complex natural-language answers (like civil-service exam essays) manually by human domain experts is extremely expensive and slow. An LLM-as-a-Judge system automates this by scoring answers against explicit, multi-dimensional rubrics.
+
+```text
+You are grading an exam answer against an evaluation rubric.
+
+QUESTION (max marks: {max_marks}): {question}
+
+RUBRIC - expected dimensions and their marks:
+{rubric_dimensions_for_this_question}
+
+ANSWER: {answer}
+
+For each dimension, decide whether the answer genuinely addresses it (and how well), then allocate marks.
+Do NOT reward verbosity, keyword-stuffing, or confident assertions that lack substantiation.
+Reward structure, relevant examples, and balanced argumentation.
+
+Respond in JSON only:
+{
+  "dimensions": [{"dimension": "...", "addressed": true, "marks": 0}],
+  "total_marks": 0,
+  "reasoning": "two-sentence justification"
+}
+```
+
+**Human calibration is mandatory before trusting a judge.** Before deploying an LLM-as-a-Judge into an evaluation pipeline, it must be calibrated against human expert judgments on a sample validation set:
+
+| Answer ID | Question ID | Human Marks | Judge Marks | Alignment |
+|---|---|---|---|---|
+| a1 | q1 | 13 | 12 | High alignment (delta -1) |
+| a2 | q1 | 4 | 8 | **Misalignment outlier (delta +4)** — judge rewarded keyword-stuffing; rubric prompt updated to penalize superficial keywords |
+| a3 | q1 | 8 | 8 | Perfect alignment |
+| a4 | q2 | 6 | 6 | Perfect alignment |
+| a5 | q2 | 1 | 2 | High alignment (delta +1) |
+| a6 | q3 | 12 | 12 | Perfect alignment |
+| a7 | q3 | 6 | 5 | High alignment (delta -1) |
+
+**Calibration and golden-dataset workflow:**
+
+1. **Sample validation set** — run a subset of outputs through both human experts and the LLM judge.
+2. **Discrepancy analysis** — identify outliers (e.g. answer `a2`, where the human gave 4 but the judge gave 8).
+3. **Rubric refinement** — update the judge's prompt to explicitly close the gap (e.g. add a constraint against rewarding verbosity or superficial tone).
+4. **Golden dataset creation** — once judge-human score correlation reaches roughly 0.90+, use the calibrated judge to annotate large-scale golden datasets for automated CI/CD evaluation.
+
+> ⚠️ **Warning**: Never deploy an LLM-as-a-Judge without this calibration step. An uncalibrated judge can systematically reward the wrong things (length, confident tone, keyword density) and you won't know it until the misalignment shows up as a real production failure.
+
+### Reference-Based vs. Reference-Free Evaluations
+
+```mermaid
+flowchart TD
+    T["Evaluation Reference Types"] --> RB["Reference-Based<br/>(ground-truth target)"]
+    T --> RF["Reference-Free<br/>(rubric-based scale)"]
+```
+
+**Reference-based evaluations** — you have a known-correct reference answer (or key ground-truth points) written down in advance for each test case, and grade by comparing the output against it.
+- Exact string match / regex matching
+- BLEU / ROUGE n-gram similarity scores
+- Semantic embedding similarity (cosine distance between output and reference)
+- RAG context recall (how many facts from reference documents were retrieved)
+
+**Reference-free evaluations** — there's no predefined correct answer for each item; you judge quality directly against a criterion or rubric (a scale/standard, not a per-item answer).
+- LLM-as-a-Judge grading essays against dimension rubrics
+- RAG faithfulness / groundedness (is the answer supported by context, independent of any ground truth?)
+- Toxicity, PII leakage, and safety guardrail checks
+- Conversational tone and fluency evaluation
+
+---
+
+## Offline Evals vs. Online Evals
+
+LLM evaluations happen in two distinct execution environments across the software lifecycle: **Offline Evals** (pre-deployment) and **Online Evals** (post-deployment).
+
+```mermaid
+flowchart TD
+    E["LLM Evals"] --> O["Offline Evals<br/>(pre-deployment / staging)"]
+    E --> L["Online Evals<br/>(post-deployment / production)"]
+```
+
+| | Offline Evals | Online Evals |
+|---|---|---|
+| **Purpose** | Application correctness and release gating | Monitor normal functioning under live load |
+| **Dataset** | Curated golden set | Live production traffic — no answer key |
+| **Tech** | Regression test suites | Asynchronous, non-blocking logging |
+
+### Offline Evals
+
+**Offline Evals** run in a staging/development environment before releasing a model or prompt version to production. Three core purposes:
+
+1. **Pre-release testing (gating)** — a quality gate ensuring correctness meets threshold criteria before shipping.
+2. **Version comparison** — A/B benchmarking between iterations (Prompt v1 vs. v2, or one model vs. another).
+3. **Regression testing** — verifying new code, retriever changes, or prompt edits don't break existing functionality across curated test datasets.
+
+### Why Offline Evals Are Not Enough
+
+Offline evals verify pre-deployment correctness on curated datasets, but they cannot catch real-world production phenomena:
+
+- **Unanticipated inputs** — live users submit queries never envisioned during dataset creation: code-mixed/multilingual queries, ambiguous or truncated half-questions, frustrated rants with the real question buried inside, and adversarial prompt-injection attempts.
+- **Emergent and systemic failures** — issues that only show up at scale, under load, or over time: a vector index silently lagging behind source updates, cost per conversation quietly tripling after a prompt change, tail latency (p99) frustrating a segment of users, subtle bias or hallucinations only visible across tens of thousands of live conversations, or degradation under high concurrency.
+- **Data and concept drift** — shifts in user queries, domain trends, or language patterns over time.
+
+### Online Evals
+
+**Online Evals** evaluate system performance on live production traffic after deployment, as real users interact with the application.
+
+> ⚠️ **Warning — the central challenge of online evals**: in production there is no answer key — no ground-truth reference for a live user's query.
+
+### Production Logging and Telemetry
+
+The technique powering online evals is **structured production logging and observability** — every conversation turn is captured as a structured, replayable record.
+
+| Log Category | Captures |
+|---|---|
+| **Identity / Threading** | `conversation_id`, `turn_id`, `user_id`, timestamp |
+| **Input** | Raw user query, normalized text, detected intent |
+| **Retrieved Context** | Vector chunks, document IDs, similarity scores |
+| **Output** | Response text, model name, prompt version |
+| **Operational Telemetry** | Latency (retrieval vs. generation), tokens, cost |
+| **Downstream Signals** | Thumbs up/down, human escalation, drop-off |
+
+**Four key engineering properties of production logging:**
+
+1. **Non-blocking** — logging must never add latency to the user's response; events fire asynchronously into a queue (Kafka, Redis Pub/Sub) and are written in the background.
+2. **Durable and queryable** — stored in a data warehouse or observability platform (Snowflake, BigQuery, Arize Phoenix, LangSmith, Datadog) where analytical queries can run across trace logs.
+3. **Late-signal attachment** — downstream signals arrive at different times (a thumbs-down in seconds, a support escalation in an hour, a conversion the next day); records are keyed on `conversation_id` and updated asynchronously as signals arrive.
+4. **PII handling and security** — automated redaction/tokenization of emails, phone numbers, and private data before logging, alongside strict retention policies.
+
+### Captured vs. Computed Metrics
+
+Production metrics fall into two categories based on how they're derived:
+
+```mermaid
+flowchart TD
+    M["Online Eval Metrics"] --> C["Captured Metrics<br/>(read directly from trace)"]
+    M --> Co["Computed Metrics<br/>(produced by an evaluator)"]
+```
+
+| Metric Family | Definition | Examples | Operational Impact |
+|---|---|---|---|
+| **Captured Metrics** | Telemetry and behavioral signals read directly from the execution trace, no evaluator model needed | User signals (thumbs up/down, escalation rate, drop-off, rephrase rate, conversion rate); operational telemetry (p50/p95/p99 latency, cost per conversation, token usage, error rate) | Zero added latency, zero model cost — extracted naturally from execution logs |
+| **Computed Metrics** | Quality, safety, and correctness scores produced asynchronously by an evaluator model | Quality (faithfulness, answer relevance, correctness, hallucination score, conciseness); safety (toxicity, bias, PII leakage, prompt-injection vulnerability); UX (task completion rate, satisfaction) | Asynchronous compute — calculated by passing logged traces (or a sampled percentage of traffic) through LLM-as-a-Judge evaluators |
+
+### The End-to-End Online Evals Pipeline
+
+```mermaid
+flowchart TD
+    Traffic["Live Production Traffic"] --> Log["Logging Step<br/>(LangSmith / Arize Phoenix / Braintrust / Kafka)"]
+    Log --> Cap["Captured Metrics<br/>(latency, tokens, cost, thumbs up/down, errors)"]
+    Log --> Comp["Computed Metrics<br/>(LLM-as-a-Judge: faithfulness, hallucination)"]
+    Cap --> Dash["Dashboarding<br/>(real-time metric tracking)"]
+    Comp --> Dash
+    Dash --> Alert["Alerting and Incident Triggering<br/>(Slack / Email / WhatsApp)"]
+```
+
+1. **Logging** — live traffic is captured by an observability layer (LangSmith, Arize Phoenix, Braintrust, Datadog).
+2. **Dual-stream metric processing** — captured metrics (latency, tokens, cost, immediate feedback) log directly; computed metrics route asynchronously to LLM-as-a-Judge evaluators without delaying the user's response.
+3. **Dashboarding** — captured and computed metrics aggregate into real-time time-series dashboards.
+4. **Alerting** — automated threshold monitors trigger incident alerts when metrics breach acceptable boundaries (e.g. p99 latency spikes, error rate over 2%, or faithfulness dropping below baseline).
+
+### Offline vs. Online Evals Summary
+
+| Dimension | Offline Evals | Online Evals |
+|---|---|---|
+| **Timing** | Pre-deployment (staging / CI/CD) | Post-deployment (production) |
+| **Core Goal** | Ensure application correctness and gating | Ensure the application functions normally under live load |
+| **Dataset** | Curated golden dataset with optional ground truth | Live production user queries — no answer key |
+| **Evaluation Method** | LLM-as-a-Judge, exact match, reference comparison | Production logging telemetry, implicit/explicit user signals, online guardrails |
+| **Key Metrics** | Accuracy, groundedness, faithfulness, recall | P95/P99 latency, cost per request, thumbs up/down rate, escalation rate, error percentage |
+
 ---
 
 ## Case Studies
@@ -530,7 +703,31 @@ Traditional testing assumes deterministic execution and a clear pass/fail oracle
 </details>
 
 <details>
-<summary><b>Q7. What lesson do the Chevrolet chatbot and Mata v. Avianca cases both illustrate?</b></summary>
+<summary><b>Q7. Why must an LLM-as-a-Judge be calibrated against human evaluators before it's trusted in a pipeline?</b></summary>
+
+<br>
+
+An uncalibrated judge can systematically reward the wrong things — verbosity, confident tone, or keyword-stuffing — without anyone noticing, because its scores look plausible in isolation. Running a validation set through both human experts and the judge, then examining discrepancy outliers, is what reveals these blind spots so the judge's rubric/prompt can be fixed before it's used to grade thousands of unseen cases.
+</details>
+
+<details>
+<summary><b>Q8. What is the core difference between Offline and Online Evals, and why do you need both?</b></summary>
+
+<br>
+
+Offline Evals run pre-deployment against a curated golden dataset to gate releases and catch regressions — but they can't see unanticipated real-user inputs, emergent failures at scale, or data drift. Online Evals monitor live production traffic after deployment, but face the challenge of having no ground-truth answer key, relying instead on captured telemetry and computed LLM-as-a-Judge scores over sampled traffic. Offline evals are necessary but not sufficient; production behavior only becomes visible once real users are interacting with the system.
+</details>
+
+<details>
+<summary><b>Q9. What's the difference between a captured metric and a computed metric in online evaluation?</b></summary>
+
+<br>
+
+A captured metric is read directly from the execution trace with no evaluator model involved — latency, token count, cost, thumbs up/down — so it costs nothing extra and adds no latency. A computed metric (faithfulness, hallucination score, toxicity) is produced asynchronously by passing logged traces through an LLM-as-a-Judge evaluator, which costs compute and time but captures quality dimensions a raw trace can't reveal on its own.
+</details>
+
+<details>
+<summary><b>Q10. What lesson do the Chevrolet chatbot and Mata v. Avianca cases both illustrate?</b></summary>
 
 <br>
 
@@ -555,6 +752,13 @@ Both are production failures that adversarial/safety red-teaming and faithfulnes
 | Programmatic Eval | Code-based, deterministic, instant, cheap |
 | Human Eval | Gold standard, slow, expensive, low scale |
 | LLM-as-a-Judge | Fast, scalable, best for open-ended quality |
+| Judge Calibration | Validate judge scores against human experts before trusting it |
+| Reference-Based Eval | Grade against a known-correct answer (exact match, BLEU/ROUGE, embedding similarity) |
+| Reference-Free Eval | Grade against a rubric/criterion with no per-item correct answer (faithfulness, toxicity) |
+| Offline Eval | Pre-deployment gating against a curated golden dataset |
+| Online Eval | Post-deployment monitoring of live traffic — no answer key |
+| Captured Metric | Read directly from the trace — latency, tokens, cost, thumbs up/down |
+| Computed Metric | Produced by an evaluator model — faithfulness, hallucination, toxicity |
 | Vibe Testing | Ad-hoc manual sampling — not a real eval, don't ship on it |
 
 > 📌 **Rule of thumb**: Mechanically checkable → **programmatic**. Open-ended quality → **LLM-as-a-Judge**. High-stakes or highly subjective → **human evaluation**. Cover **Quality + Safety + Operational**, at **Component + Workflow + Entire Application** scope, every time.
